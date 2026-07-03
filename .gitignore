@@ -1,0 +1,6 @@
+# Local dev server — not needed on the hosted site
+serve.ps1
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
