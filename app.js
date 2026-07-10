@@ -771,6 +771,17 @@ function renderHome() {
       </button>
     </div>
     <div class="stack">
+      ${iosBrowserMode() && !localStorage.getItem("tritrack:iosbanner") ? `
+      <div class="card" style="border-color:rgba(199,255,89,.35)">
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <div style="font-size:18px">📲</div>
+          <div style="flex:1;min-width:0">
+            <div class="card-title" style="font-size:13.5px">Using Safari? Install the app first.</div>
+            <div class="card-sub" style="line-height:1.5;margin-top:3px">Share → Add to Home Screen, then do your setup in the installed app — iPhone keeps the two completely separate.</div>
+          </div>
+          <button class="icon-btn" style="width:28px;height:28px;font-size:12px" onclick="A.dismissIosBanner()">✕</button>
+        </div>
+      </div>` : ""}
       <div class="card">
         <div class="countdown-row">
           <div class="flag-ico">🏁</div>
@@ -2520,6 +2531,14 @@ function saveAiSettings() {
 
 const WELCOMED_KEY = "tritrack:welcomed";
 
+/* iOS keeps Safari and the installed (home-screen) app in totally separate
+   storage jars — setup done in one never reaches the other. So in Safari on
+   iOS we push people to install FIRST, then set up inside the installed app. */
+const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const IS_STANDALONE = navigator.standalone === true ||
+  (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+const iosBrowserMode = () => IS_IOS && !IS_STANDALONE;
+
 function showWelcome() {
   $("#overlay-root").innerHTML = `
     <div class="welcome">
@@ -2528,6 +2547,13 @@ function showWelcome() {
         <div class="welcome-title">TriTrack AI</div>
         <div class="welcome-sub">Your AI training coach — 5K to Ironman.<br>
           Everything you log stays on <b>your</b> phone.</div>
+        ${iosBrowserMode() ? `
+        <div class="install-tip">
+          <b>📲 Install first — then set up.</b><br>
+          Tap <b>Share</b> → <b>Add to Home Screen</b>, open TriTrack AI from the new
+          icon, and connect Strava <b>there</b>. iPhone keeps Safari and the installed
+          app completely separate — anything you set up here stays here.
+        </div>` : ""}
         <button class="btn btn-strava" onclick="A.welcomeStrava()">Connect with Strava</button>
         <div class="welcome-hint">Your runs sync in automatically. You log in on Strava's own page — this app never sees your password.</div>
         <button class="btn btn-ghost" style="width:100%" onclick="A.welcomeSkip()">Skip for now</button>
@@ -2714,6 +2740,7 @@ window.A = {
   coachBack() { ui.coach.result = null; ui.coach.error = null; render(); },
   openAiSettings, saveAiSettings,
   welcomeStrava, welcomeSkip,
+  dismissIosBanner() { localStorage.setItem("tritrack:iosbanner", "1"); render(); },
   // library
   openLibrary, editExercise, saveExercise, deleteExercise,
   // templates
