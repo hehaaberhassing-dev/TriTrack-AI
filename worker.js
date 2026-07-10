@@ -124,7 +124,13 @@ export default {
         await env.TOKENS.put(session, JSON.stringify({ refresh_token: tok.refresh_token }));
       }
 
-      const back = appOrigin + (appOrigin.includes("#") ? "&" : "#") + "strava_session=" + session;
+      // Tell the app who connected, so it can show "Connected as <name>"
+      // (catches wrong-account logins immediately).
+      const athleteName = tok.athlete
+        ? [tok.athlete.firstname, tok.athlete.lastname].filter(Boolean).join(" ")
+        : "";
+      const back = appOrigin + (appOrigin.includes("#") ? "&" : "#") + "strava_session=" + session +
+        (athleteName ? "&strava_athlete=" + encodeURIComponent(athleteName) : "");
       return Response.redirect(back, 302);
     }
 

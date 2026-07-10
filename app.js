@@ -1162,6 +1162,53 @@ function closeModal() {
   $("#overlay-root").innerHTML = "";
 }
 
+/* Popup replacements — iOS home-screen apps often silently swallow native
+   alert/confirm/prompt dialogs, so the app never uses them. */
+
+let toastTimer = null;
+function toast(msg) {
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 300);
+  }, 3400);
+}
+
+function confirmSheet(message, onYes, yesLabel = "Confirm") {
+  openModal(`
+    <div class="sheet-title">Are you sure?</div>
+    <div class="card-sub" style="line-height:1.6;font-size:13.5px;margin-top:4px">${esc(message)}</div>
+    <div class="sheet-actions">
+      <button class="btn btn-ghost" onclick="A.closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="confirm-yes">${esc(yesLabel)}</button>
+    </div>`);
+  $("#confirm-yes").onclick = () => { closeModal(); onYes(); };
+}
+
+function promptSheet(title, initial, placeholder, onSave) {
+  openModal(`
+    <div class="sheet-title">${esc(title)}</div>
+    <input class="input" id="prompt-in" placeholder="${esc(placeholder)}" value="${esc(initial)}" style="margin-top:10px">
+    <div class="sheet-actions">
+      <button class="btn btn-ghost" onclick="A.closeModal()">Cancel</button>
+      <button class="btn btn-accent" id="prompt-save">Save</button>
+    </div>`);
+  const input = $("#prompt-in");
+  $("#prompt-save").onclick = () => {
+    const v = input.value.trim();
+    if (!v) { input.focus(); return; }
+    closeModal();
+    onSave(v);
+  };
+  setTimeout(() => input.focus(), 80);
+}
+
 /* ---------- Profiles ---------- */
 
 function openProfiles() {
@@ -1204,55 +1251,57 @@ function switchProfile(id) {
 }
 
 function newProfile() {
-  const name = (prompt("Name for the new profile:", "") || "").trim();
-  if (!name) return;
-  const id = uid();
-  profiles.push({ id, name });
-  currentId = id;
-  state = seed();
-  ui.planWeek = null;
-  ui.tab = "home";
-  saveProfiles();
-  save();
-  closeModal();
-  render();
+  promptSheet("New profile", "", "Name", (name) => {
+    const id = uid();
+    profiles.push({ id, name });
+    currentId = id;
+    state = seed();
+    ui.planWeek = null;
+    ui.tab = "home";
+    saveProfiles();
+    save();
+    render();
+  });
 }
 
 function renameProfile() {
   const p = currentProfile();
-  const name = (prompt("Rename profile:", p.name) || "").trim();
-  if (!name) return;
-  p.name = name;
-  saveProfiles();
-  openProfiles();
+  promptSheet("Rename profile", p.name, "Name", (name) => {
+    p.name = name;
+    saveProfiles();
+    openProfiles();
+  });
 }
 
 function deleteProfile(id) {
-  if (profiles.length <= 1) { alert("You need at least one profile."); return; }
+  if (profiles.length <= 1) { toast("You need at least one profile."); return; }
   const p = profiles.find((x) => x.id === id);
-  if (!p || !confirm(`Delete profile "${p.name}" and all of its data on this device? This can't be undone.`)) return;
-  localStorage.removeItem(dataKey(id));
-  profiles = profiles.filter((x) => x.id !== id);
-  if (currentId === id) {
-    currentId = profiles[0].id;
-    state = readData(currentId) || seed();
-    ui.planWeek = null;
-  }
-  saveProfiles();
-  save();
-  render();
-  openProfiles();
+  if (!p) return;
+  confirmSheet(`Delete profile "${p.name}" and all of its data on this device? This can't be undone.`, () => {
+    localStorage.removeItem(dataKey(id));
+    profiles = profiles.filter((x) => x.id !== id);
+    if (currentId === id) {
+      currentId = profiles[0].id;
+      state = readData(currentId) || seed();
+      ui.planWeek = null;
+    }
+    saveProfiles();
+    save();
+    render();
+    openProfiles();
+  }, "Delete");
 }
 
 function clearProgress() {
-  if (!confirm("Clear this profile's runs, rides, swims and gym history? Your exercises and training plan are kept.")) return;
-  state.cardio = [];
-  state.history = [];
-  // reset plan check-offs too
-  state.plan.forEach((s) => (s.completed = false));
-  save();
-  closeModal();
-  render();
+  confirmSheet("Clear this profile's runs, rides, swims and gym history? Your exercises and training plan are kept.", () => {
+    state.cardio = [];
+    state.history = [];
+    // reset plan check-offs too
+    state.plan.forEach((s) => (s.completed = false));
+    save();
+    render();
+    toast("Progress cleared.");
+  }, "Clear");
 }
 
 /* ---------- Exercise library ---------- */
@@ -1319,10 +1368,11 @@ function saveExercise(id) {
 function deleteExercise(id) {
   const e = state.exercises.find((x) => x.id === id);
   if (!e) return;
-  if (!confirm(`Delete "${e.name}"? Past workouts that used it keep their data.`)) return;
-  state.exercises = state.exercises.filter((x) => x.id !== id);
-  save();
-  openLibrary();
+  confirmSheet(`Delete "${e.name}"? Past workouts that used it keep their data.`, () => {
+    state.exercises = state.exercises.filter((x) => x.id !== id);
+    save();
+    openLibrary();
+  }, "Delete");
 }
 
 /* ---------- Template editor ---------- */
@@ -1413,10 +1463,12 @@ function saveTemplate() {
 
 function deleteTemplate(id) {
   const t = state.templates.find((x) => x.id === id);
-  if (!t || !confirm(`Delete workout "${t.name}"?`)) return;
-  state.templates = state.templates.filter((x) => x.id !== id);
-  save();
-  render();
+  if (!t) return;
+  confirmSheet(`Delete workout "${t.name}"?`, () => {
+    state.templates = state.templates.filter((x) => x.id !== id);
+    save();
+    render();
+  }, "Delete");
 }
 
 /* ---------- Cardio editor ---------- */
@@ -1485,7 +1537,7 @@ function saveCardio() {
     (parseInt($("#cd-h").value) || 0) * 3600 + (parseInt($("#cd-m").value) || 0) * 60 + (parseInt($("#cd-s").value) || 0);
   c.effort = parseInt($("#cd-rpe").value) || 5;
   c.notes = $("#cd-notes").value.trim();
-  if (c.distanceKM <= 0 || c.durationSeconds <= 0) { alert("Enter a distance and duration."); return; }
+  if (c.distanceKM <= 0 || c.durationSeconds <= 0) { toast("Enter a distance and duration."); return; }
   delete c._new;
   const i = state.cardio.findIndex((x) => x.id === c.id);
   if (i >= 0) state.cardio[i] = c; else state.cardio.unshift(c);
@@ -1496,10 +1548,11 @@ function saveCardio() {
 }
 
 function deleteCardio(id) {
-  if (!confirm("Delete this session?")) return;
-  state.cardio = state.cardio.filter((x) => x.id !== id);
-  save();
-  render();
+  confirmSheet("Delete this session?", () => {
+    state.cardio = state.cardio.filter((x) => x.id !== id);
+    save();
+    render();
+  }, "Delete");
 }
 
 /* ---------- Strava import ---------- */
@@ -1517,8 +1570,9 @@ function openStravaImport() {
     <div class="field-label">Automatic sync</div>
     ${connected ? `
       <div class="card" style="margin-top:2px">
-        <div class="card-title" style="color:var(--accent)">✓ Connected</div>
+        <div class="card-title" style="color:var(--accent)">✓ Connected${cfg.athlete ? " as " + esc(cfg.athlete) : ""}</div>
         <div class="card-sub" style="margin-top:4px">Last synced: ${esc(lastSync)}</div>
+        <div class="card-sub" style="margin-top:2px">Wrong account? Disconnect, then reconnect and use “Switch account” on Strava's page.</div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button class="btn btn-accent btn-sm" style="flex:1" onclick="A.stravaSyncNow()">Sync now</button>
           <button class="btn btn-ghost btn-sm" style="flex:1" onclick="A.stravaDisconnect()">Disconnect</button>
@@ -1560,7 +1614,7 @@ function stravaConnect() {
   const input = $("#strava-worker");
   let workerUrl = (input ? input.value : "").trim().replace(/\/+$/, "") || DEFAULT_WORKER_URL;
   if (!/^https?:\/\//.test(workerUrl)) {
-    alert("The backend URL must start with https://");
+    toast("The backend URL must start with https://");
     return;
   }
   state.strava = state.strava || {};
@@ -1571,10 +1625,11 @@ function stravaConnect() {
 }
 
 function stravaDisconnect() {
-  if (!confirm("Disconnect Strava? Already-synced runs stay; new ones just won't come in automatically.")) return;
-  if (state.strava) { delete state.strava.session; delete state.strava.lastSync; }
-  save();
-  openStravaImport();
+  confirmSheet("Disconnect Strava? Already-synced runs stay; new ones just won't come in automatically.", () => {
+    if (state.strava) { delete state.strava.session; delete state.strava.lastSync; delete state.strava.athlete; }
+    save();
+    openStravaImport();
+  }, "Disconnect");
 }
 
 function stravaSyncNow() { stravaSync(false); }
@@ -1610,7 +1665,7 @@ function stravaApiToSession(a) {
 async function stravaSync(silent) {
   const cfg = state.strava;
   if (!cfg || !cfg.workerUrl || !cfg.session) {
-    if (!silent) alert("Not connected to Strava yet.");
+    if (!silent) toast("Not connected to Strava yet.");
     return;
   }
   // small look-back so late-uploaded runs aren't missed; duplicates are ignored
@@ -1629,11 +1684,11 @@ async function stravaSync(silent) {
     save();
     render();
     if (!silent) {
-      alert("Synced — " + result.added + " new activit" + (result.added === 1 ? "y" : "ies") +
+      toast("Synced — " + result.added + " new activit" + (result.added === 1 ? "y" : "ies") +
         (result.dup ? " (" + result.dup + " already had)" : "") + ".");
     }
   } catch (e) {
-    if (!silent) alert("Couldn't sync with Strava: " + e.message + ".\nCheck your backend URL and STRAVA-SETUP.md.");
+    if (!silent) toast("Couldn't sync with Strava: " + e.message);
   }
 }
 
@@ -1645,6 +1700,8 @@ function handleStravaRedirect() {
   state.strava = state.strava || {};
   state.strava.workerUrl = state.strava.workerUrl || DEFAULT_WORKER_URL;
   state.strava.session = m[1];
+  const an = (location.hash || "").match(/strava_athlete=([^&]+)/);
+  if (an) { try { state.strava.athlete = decodeURIComponent(an[1]).slice(0, 60); } catch {} }
   state.strava.lastSync = 0; // first sync pulls full history
   save();
   history.replaceState(null, "", location.pathname + location.search);
@@ -1773,7 +1830,7 @@ function stravaDoImport() {
   closeModal();
   ui.activitySeg = "endurance";
   render();
-  alert(`Imported ${res.added} new session${res.added === 1 ? "" : "s"}${res.dup ? ` · ${res.dup} duplicate${res.dup === 1 ? "" : "s"} skipped` : ""}.`);
+  toast(`Imported ${res.added} new session${res.added === 1 ? "" : "s"}${res.dup ? ` · ${res.dup} duplicate${res.dup === 1 ? "" : "s"} skipped` : ""}.`);
 }
 
 /* ---------- Workout detail ---------- */
@@ -1801,11 +1858,11 @@ function showWorkout(id) {
 }
 
 function deleteWorkout(id) {
-  if (!confirm("Delete this workout from history?")) return;
-  state.history = state.history.filter((x) => x.id !== id);
-  save();
-  closeModal();
-  render();
+  confirmSheet("Delete this workout from history?", () => {
+    state.history = state.history.filter((x) => x.id !== id);
+    save();
+    render();
+  }, "Delete");
 }
 
 /* ---------- Plan settings ---------- */
@@ -1827,27 +1884,30 @@ function openPlanSettings() {
 }
 
 function restoreBuiltinPlan() {
-  if (!confirm("Replace your coach-built plan with the built-in 20-week marathon plan? All check-offs will be cleared.")) return;
-  delete state.planMeta;
-  state.plan = generatePlan();
-  state.planVersion = PLAN_VERSION;
-  ui.planWeek = null;
-  save();
-  closeModal();
-  render();
+  confirmSheet("Replace your coach-built plan with the built-in 20-week marathon plan? All check-offs will be cleared.", () => {
+    delete state.planMeta;
+    state.plan = generatePlan();
+    state.planVersion = PLAN_VERSION;
+    ui.planWeek = null;
+    save();
+    render();
+  }, "Restore");
 }
 
 function applyPlanStart(regen) {
   const v = $("#plan-start").value;
   const d = v ? new Date(v + "T00:00:00") : null;
   if (!d || isNaN(d.getTime())) return;
-  if (regen && !confirm("Regenerate the whole plan? All check-offs will be cleared.")) return;
-  state.planStartDate = d.getTime();
-  if (regen) state.plan = generatePlan();
-  ui.planWeek = null;
-  save();
-  closeModal();
-  render();
+  const doIt = () => {
+    state.planStartDate = d.getTime();
+    if (regen) state.plan = generatePlan();
+    ui.planWeek = null;
+    save();
+    closeModal();
+    render();
+  };
+  if (regen) confirmSheet("Regenerate the whole plan? All check-offs will be cleared.", doIt, "Regenerate");
+  else doIt();
 }
 
 /* ============================== Active workout ============================== */
@@ -2007,9 +2067,11 @@ function awAddSet(exId) {
 
 function awRemoveExercise(exId) {
   if (!aw) return;
-  if (!confirm("Remove this exercise from the workout?")) return;
-  aw.w.exercises = aw.w.exercises.filter((x) => x.id !== exId);
-  awRefreshBody();
+  confirmSheet("Remove this exercise from the workout?", () => {
+    if (!aw) return;
+    aw.w.exercises = aw.w.exercises.filter((x) => x.id !== exId);
+    awRefreshBody();
+  }, "Remove");
 }
 
 function awAddExercise() {
@@ -2067,8 +2129,7 @@ function awFinish() {
 
 function awDiscard() {
   if (!aw) return;
-  if (!confirm("Discard this workout? Nothing will be saved.")) return;
-  endAW();
+  confirmSheet("Discard this workout? Nothing will be saved.", () => endAW(), "Discard");
 }
 
 function awSkipRest() {
@@ -2392,8 +2453,16 @@ async function coachGenerate() {
 function coachApply() {
   const r = ui.coach.result;
   if (!r) return;
-  if (state.plan.some((s) => s.completed) &&
-      !confirm("Replace your current plan? Existing check-offs will be cleared.")) return;
+  if (state.plan.some((s) => s.completed)) {
+    confirmSheet("Replace your current plan? Existing check-offs will be cleared.", () => doCoachApply(), "Replace");
+    return;
+  }
+  doCoachApply();
+}
+
+function doCoachApply() {
+  const r = ui.coach.result;
+  if (!r) return;
   const plan = r.plan;
   state.plan = plan.sessions.map((s) => ({ ...s, id: uid(), completed: false }));
   state.planMeta = {
@@ -2438,7 +2507,7 @@ function openAiSettings() {
 
 function saveAiSettings() {
   const v = ($("#ai-url").value || "").trim().replace(/\/+$/, "");
-  if (v && !/^https?:\/\//.test(v)) { alert("The URL must start with https://"); return; }
+  if (v && !/^https?:\/\//.test(v)) { toast("The URL must start with https://"); return; }
   if (v) state.aiWorkerUrl = v; else delete state.aiWorkerUrl;
   save();
   closeModal();
