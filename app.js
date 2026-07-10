@@ -54,6 +54,11 @@ const SPORTS = {
 
 const CATEGORIES = ["Legs", "Push", "Pull", "Core", "Full Body", "Mobility", "Other"];
 
+/* The app's default backend (Cloudflare Worker) — powers one-tap Strava connect
+   and the AI coach for every user. Each user still authorizes their own Strava
+   account; the backend never mixes people's data. Overridable in Coach → ⚙. */
+const DEFAULT_WORKER_URL = "https://tritrack-strava.hehaaberhassing.workers.dev";
+
 function sportIcon(sport, size = 38) {
   const s = SPORTS[sport] || SPORTS.run;
   return `<div class="sport-ico" style="width:${size}px;height:${size}px;background:${s.hex}2b">${s.emoji}</div>`;
@@ -1521,12 +1526,15 @@ function openStravaImport() {
       </div>
     ` : `
       <div class="card-sub" style="line-height:1.6">
-        Pulls new runs in automatically. One-time setup: follow <b>STRAVA-SETUP.md</b>
-        to create your free Strava app + backend, then paste your backend URL here.
+        Connect your own Strava account and new runs appear here automatically.
+        You approve on Strava's own page — your data stays on this device.
       </div>
-      <input class="input" id="strava-worker" placeholder="https://tritrack-strava.<navn>.workers.dev"
-        value="${esc(cfg.workerUrl || "")}" style="margin-top:10px">
       <button class="btn btn-accent" style="margin-top:10px" onclick="A.stravaConnect()">Connect Strava</button>
+      <details style="margin-top:10px">
+        <summary class="card-sub" style="cursor:pointer">Advanced: use your own backend</summary>
+        <input class="input" id="strava-worker" placeholder="${esc(DEFAULT_WORKER_URL)}"
+          value="${esc(cfg.workerUrl || "")}" style="margin-top:8px">
+      </details>
     `}
 
     <div class="divider"></div>
@@ -1550,9 +1558,9 @@ function openStravaImport() {
 
 function stravaConnect() {
   const input = $("#strava-worker");
-  const workerUrl = (input ? input.value : "").trim().replace(/\/+$/, "");
+  let workerUrl = (input ? input.value : "").trim().replace(/\/+$/, "") || DEFAULT_WORKER_URL;
   if (!/^https?:\/\//.test(workerUrl)) {
-    alert("Paste your backend URL first (it starts with https:// and ends in .workers.dev).");
+    alert("The backend URL must start with https://");
     return;
   }
   state.strava = state.strava || {};
@@ -1631,9 +1639,11 @@ async function stravaSync(silent) {
 
 /* On returning from the Strava authorize redirect (#strava_session=…) */
 function handleStravaRedirect() {
-  const m = (location.hash || "").match(/strava_session=([A-Za-z0-9_-]+)/);
+  const m = (location.hash || "").match(/strava_session=([A-Za-z0-9._-]+)/);
   if (!m) return false;
+  localStorage.setItem("tritrack:welcomed", "1");
   state.strava = state.strava || {};
+  state.strava.workerUrl = state.strava.workerUrl || DEFAULT_WORKER_URL;
   state.strava.session = m[1];
   state.strava.lastSync = 0; // first sync pulls full history
   save();
@@ -2352,14 +2362,16 @@ async function coachGenerate() {
   ui.coach.error = null;
   render();
 
-  let plan = null, engine = "coach";
-  const url = (state.aiWorkerUrl || "").trim().replace(/\/+$/, "");
+  let plan = null, engine = "coach", aiNote = null;
+  const url = (state.aiWorkerUrl || DEFAULT_WORKER_URL).trim().replace(/\/+$/, "");
   if (url) {
     try {
       plan = normalizePlan(await fetchAIPlan(url, inp), inp);
       engine = "ai";
     } catch (e) {
-      ui.coach.error = "AI backend didn't answer (" + e.message + ") — the built-in coach stepped in.";
+      // Not an error for the user — the built-in coach still delivers a plan.
+      aiNote = "AI backend not reachable right now — the built-in coach engine made this plan.";
+      console.warn("AI plan fallback:", e.message);
     }
   }
   if (!plan) {
@@ -2373,7 +2385,7 @@ async function coachGenerate() {
     }
   }
   ui.coach.busy = false;
-  ui.coach.result = { plan, engine };
+  ui.coach.result = { plan, engine, aiNote };
   render();
 }
 
@@ -2407,17 +2419,17 @@ function coachApply() {
 }
 
 function openAiSettings() {
-  const url = state.aiWorkerUrl || (state.strava && state.strava.workerUrl) || "";
   openModal(`
     <div class="sheet-title">AI Engine</div>
     <div class="card-sub" style="line-height:1.6">
-      Without a backend the Coach uses its built-in engine — instant, offline, free.
-      For fully personalized AI plans (Claude reads your injuries &amp; notes), deploy
-      the worker from <b>AI-SETUP.md</b> — it's the same worker as Strava sync — and
-      paste its URL here.
+      The Coach first asks the Claude AI backend (it reads your injuries &amp; notes);
+      if the backend doesn't answer, the built-in engine builds your plan instantly
+      instead — so this always works. The default backend is preconfigured; only
+      change it if you host your own (see <b>AI-SETUP.md</b>).
     </div>
     <div class="field-label">Backend URL</div>
-    <input class="input" id="ai-url" placeholder="https://tritrack-strava.<name>.workers.dev" value="${esc(url)}">
+    <input class="input" id="ai-url" placeholder="${esc(DEFAULT_WORKER_URL)}" value="${esc(state.aiWorkerUrl || "")}">
+    <div class="card-sub" style="margin-top:6px">Leave empty to use the default backend.</div>
     <div class="sheet-actions">
       <button class="btn btn-ghost" onclick="A.closeModal()">Cancel</button>
       <button class="btn btn-accent" onclick="A.saveAiSettings()">Save</button>
@@ -2427,17 +2439,51 @@ function openAiSettings() {
 function saveAiSettings() {
   const v = ($("#ai-url").value || "").trim().replace(/\/+$/, "");
   if (v && !/^https?:\/\//.test(v)) { alert("The URL must start with https://"); return; }
-  state.aiWorkerUrl = v;
+  if (v) state.aiWorkerUrl = v; else delete state.aiWorkerUrl;
   save();
   closeModal();
   render();
+}
+
+/* ---------- Welcome (first launch) ---------- */
+/* One screen, two choices: connect Strava (one tap, no setup) or skip.
+   Shown once per browser; returning from the Strava redirect also counts. */
+
+const WELCOMED_KEY = "tritrack:welcomed";
+
+function showWelcome() {
+  $("#overlay-root").innerHTML = `
+    <div class="welcome">
+      <div class="welcome-inner">
+        <img src="icon-192.png" class="welcome-logo" alt="TriTrack AI">
+        <div class="welcome-title">TriTrack AI</div>
+        <div class="welcome-sub">Your AI training coach — 5K to Ironman.<br>
+          Everything you log stays on <b>your</b> phone.</div>
+        <button class="btn btn-strava" onclick="A.welcomeStrava()">Connect with Strava</button>
+        <div class="welcome-hint">Your runs sync in automatically. You log in on Strava's own page — this app never sees your password.</div>
+        <button class="btn btn-ghost" style="width:100%" onclick="A.welcomeSkip()">Skip for now</button>
+      </div>
+    </div>`;
+}
+
+function welcomeSkip() {
+  localStorage.setItem(WELCOMED_KEY, "1");
+  closeModal();
+}
+
+function welcomeStrava() {
+  localStorage.setItem(WELCOMED_KEY, "1");
+  state.strava = state.strava || {};
+  state.strava.workerUrl = state.strava.workerUrl || DEFAULT_WORKER_URL;
+  save();
+  const back = location.origin + location.pathname;
+  location.href = state.strava.workerUrl + "/auth?origin=" + encodeURIComponent(back);
 }
 
 /* ---------- Render: Coach ---------- */
 
 function renderCoach() {
   const c = ui.coach;
-  const aiUrl = (state.aiWorkerUrl || "").trim();
 
   if (c.busy) {
     $("#view").innerHTML = `
@@ -2448,7 +2494,7 @@ function renderCoach() {
       <div class="card" style="text-align:center;padding:44px 20px">
         <div class="spinner"></div>
         <div class="card-title" style="margin-top:18px">Designing your training</div>
-        <div class="card-sub" style="margin-top:6px">${aiUrl ? "Claude is reading your goals and injuries…" : "The coach engine is periodizing your weeks…"}</div>
+        <div class="card-sub" style="margin-top:6px">Claude is reading your goals and injuries…</div>
       </div>`;
     return;
   }
@@ -2514,15 +2560,13 @@ function renderCoach() {
 
       <button class="btn btn-accent" style="padding:16px" onclick="A.coachGenerate()">✨ Build My Plan</button>
       <div class="card-sub" style="text-align:center;line-height:1.6">
-        ${aiUrl
-          ? "Engine: Claude AI via your backend"
-          : "Engine: built-in coach · tap ⚙ to connect the Claude AI backend (AI-SETUP.md)"}
+        Engine: Claude AI · built-in coach as automatic backup
       </div>
     </div>`;
 }
 
 function renderCoachResult() {
-  const { plan, engine } = ui.coach.result;
+  const { plan, engine, aiNote } = ui.coach.result;
   const peakWeek = plan.weekKM ? Math.max(...plan.weekKM) : null;
   const w1 = plan.sessions.filter((s) => s.week === 1).sort((a, b) => a.day - b.day);
   $("#view").innerHTML = `
@@ -2536,6 +2580,7 @@ function renderCoachResult() {
       <div class="card">
         <span class="phase-pill" style="background:var(--accent-dim);color:var(--accent)">${engine === "ai" ? "🤖 BUILT BY CLAUDE AI" : "⚙ BUILT-IN COACH ENGINE"}</span>
         ${plan.summary ? `<div style="margin-top:10px;line-height:1.6;font-size:13.5px">${esc(plan.summary)}</div>` : ""}
+        ${aiNote ? `<div class="card-sub" style="margin-top:8px">${esc(aiNote)}</div>` : ""}
       </div>
       <div class="card">
         <div class="card-title">Structure</div>
@@ -2599,6 +2644,7 @@ window.A = {
   coachRaceDate, coachGenerate, coachApply,
   coachBack() { ui.coach.result = null; ui.coach.error = null; render(); },
   openAiSettings, saveAiSettings,
+  welcomeStrava, welcomeSkip,
   // library
   openLibrary, editExercise, saveExercise, deleteExercise,
   // templates
@@ -2621,6 +2667,12 @@ initProfiles();
 const fromStravaRedirect = handleStravaRedirect();
 render();
 if (!fromStravaRedirect) stravaAutoSync();
+
+// First launch: offer one-tap Strava login (skippable, shown once).
+if (!fromStravaRedirect && !localStorage.getItem(WELCOMED_KEY) &&
+    !(state.strava && state.strava.session)) {
+  showWelcome();
+}
 
 /* PWA: installable + offline. Skipped on file:// so double-clicking
    index.html keeps working exactly as before. */

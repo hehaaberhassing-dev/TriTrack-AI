@@ -48,6 +48,32 @@ function postToken(params) {
   });
 }
 
+/* "Log in with Strava" sessions: connections are stored under the athlete's
+   Strava ID, so logging in again on ANY device restores the same connection.
+   The session token handed to the app is the athlete id + an HMAC signature
+   (keyed with the client secret), so nobody can forge someone else's id. */
+async function signId(idPart, env) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(env.STRAVA_CLIENT_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("tritrack:" + idPart));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
+/* Session token → KV key. Supports both the new athlete tokens ("a<id>.<sig>")
+   and the old random-UUID sessions, so existing connections keep working. */
+async function sessionToKey(session, env) {
+  if (session && session.includes(".")) {
+    const [idPart, sig] = session.split(".");
+    if (/^a\d+$/.test(idPart) && sig === (await signId(idPart, env))) {
+      return "athlete:" + idPart.slice(1);
+    }
+    return null; // tampered token
+  }
+  return session; // legacy session id (the KV key itself)
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -85,8 +111,18 @@ export default {
       if (!res.ok) return new Response("Token exchange failed", { status: 502 });
       const tok = await res.json();
 
-      const session = crypto.randomUUID().replace(/-/g, "");
-      await env.TOKENS.put(session, JSON.stringify({ refresh_token: tok.refresh_token }));
+      // Prefer an athlete-identity session (same login on any device →
+      // same connection); fall back to a random session if no athlete id.
+      let session;
+      const athleteId = tok.athlete && tok.athlete.id;
+      if (athleteId) {
+        const idPart = "a" + athleteId;
+        session = idPart + "." + (await signId(idPart, env));
+        await env.TOKENS.put("athlete:" + athleteId, JSON.stringify({ refresh_token: tok.refresh_token }));
+      } else {
+        session = crypto.randomUUID().replace(/-/g, "");
+        await env.TOKENS.put(session, JSON.stringify({ refresh_token: tok.refresh_token }));
+      }
 
       const back = appOrigin + (appOrigin.includes("#") ? "&" : "#") + "strava_session=" + session;
       return Response.redirect(back, 302);
@@ -97,8 +133,10 @@ export default {
       const session = url.searchParams.get("session");
       const after = url.searchParams.get("after") || "0";
       if (!session) return json({ error: "no session" }, 400, allow);
+      const kvKey = await sessionToKey(session, env);
+      if (!kvKey) return json({ error: "bad session" }, 401, allow);
 
-      const stored = await env.TOKENS.get(session);
+      const stored = await env.TOKENS.get(kvKey);
       if (!stored) return json({ error: "unknown session" }, 401, allow);
       const refresh_token = JSON.parse(stored).refresh_token;
 
@@ -113,7 +151,7 @@ export default {
 
       // Strava rotates refresh tokens — persist the new one.
       if (rtok.refresh_token && rtok.refresh_token !== refresh_token) {
-        await env.TOKENS.put(session, JSON.stringify({ refresh_token: rtok.refresh_token }));
+        await env.TOKENS.put(kvKey, JSON.stringify({ refresh_token: rtok.refresh_token }));
       }
 
       const out = [];
@@ -212,7 +250,8 @@ export default {
 
     if (path.endsWith("/status")) {
       const session = url.searchParams.get("session");
-      const connected = !!(session && (await env.TOKENS.get(session)));
+      const kvKey = session ? await sessionToKey(session, env) : null;
+      const connected = !!(kvKey && (await env.TOKENS.get(kvKey)));
       return json({ connected }, 200, allow);
     }
 

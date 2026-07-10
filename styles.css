@@ -669,3 +669,33 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
   margin: 0 auto;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Welcome screen ---------- */
+.welcome {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background:
+    radial-gradient(120% 50% at 50% -10%, rgba(199, 255, 89, 0.1), transparent 60%),
+    var(--bg-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadein 0.25s ease;
+}
+.welcome-inner {
+  width: 100%;
+  max-width: 340px;
+  padding: 32px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.welcome-logo { width: 88px; height: 88px; border-radius: 22px; }
+.welcome-title { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; }
+.welcome-sub { font-size: 14px; color: var(--text-sec); line-height: 1.6; }
+.btn-strava { background: #fc4c02; color: #fff; width: 100%; margin-top: 6px; }
+.btn-strava:hover { filter: brightness(1.08); }
+.welcome-hint { font-size: 11.5px; color: var(--text-ter); line-height: 1.5; }
