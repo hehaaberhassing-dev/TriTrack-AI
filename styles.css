@@ -733,3 +733,35 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
   text-align: left;
 }
 .install-tip b { color: var(--text); }
+
+/* ---------- Update-available banner ---------- */
+.update-banner {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%) translateY(-14px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--accent);
+  color: #0a0a0a;
+  padding: 9px 9px 9px 16px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 700;
+  z-index: 100;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.update-banner.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.update-banner button {
+  border: none;
+  background: #0a0a0a;
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 12.5px;
+  padding: 6px 14px;
+  border-radius: 99px;
+  cursor: pointer;
+}

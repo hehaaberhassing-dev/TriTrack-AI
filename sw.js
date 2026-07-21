@@ -1,12 +1,12 @@
 /* TriTrack service worker — makes the app installable and fully offline.
    Bump VERSION whenever index.html/app.js/styles.css change so clients update. */
 
-const VERSION = "tritrack-ai-v14";
+const VERSION = "tritrack-ai-v16";
 const SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=14",
-  "./app.js?v=14",
+  "./styles.css?v=16",
+  "./app.js?v=16",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",

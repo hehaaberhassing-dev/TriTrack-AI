@@ -23,7 +23,11 @@ function fmtDur(secs) {
 
 const fmtKM = (km) => (km === Math.round(km) ? `${km} km` : `${km.toFixed(1)} km`);
 
+// Parse a number that may use a comma decimal (Danish keyboards type "5,2").
+const toNum = (v) => { const n = parseFloat(String(v ?? "").replace(",", ".")); return isNaN(n) ? NaN : n; };
+
 const startOfDay = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const startOfWeek = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
 
 const fmtDate = (ts) =>
   new Date(ts).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
@@ -49,7 +53,7 @@ const SPORTS = {
   bike: { label: "Bike", emoji: "🚴", hex: "#4dd9e6" },
   swim: { label: "Swim", emoji: "🏊", hex: "#669eff" },
   strength: { label: "Strength", emoji: "🏋️", hex: "#c28cff" },
-  rest: { label: "Hvile", emoji: "😴", hex: "#8a8a98" },
+  rest: { label: "Rest", emoji: "😴", hex: "#8a8a98" },
 };
 
 const CATEGORIES = ["Legs", "Push", "Pull", "Core", "Full Body", "Mobility", "Other"];
@@ -103,9 +107,8 @@ function saveProfiles() {
 function migratePlan(snap) {
   if (snap.planMeta) return snap; // a coach/AI-built plan is personal — never overwrite it
   if (!snap.planVersion || snap.planVersion < PLAN_VERSION) {
-    snap.plan = generatePlan();
-    snap.planStartDate = PLAN_START_DEFAULT;
-    snap.planVersion = PLAN_VERSION;
+    setPlan(snap, builtinPlan());
+    snap.planStartDate = startOfWeek(Date.now());
   }
   return snap;
 }
@@ -375,14 +378,24 @@ const PLAN_WEEKS = [
   ],
 ];
 
-function generatePlan() {
-  const out = [];
-  PLAN_WEEKS.forEach((days, i) => {
-    for (const [day, sport, title, detail] of days) {
-      out.push({ id: uid(), week: i + 1, day, title, detail, sport, completed: false });
-    }
-  });
-  return out;
+/* The built-in starter plan every new user sees: a generic, English, periodized
+   marathon block produced by the same coach engine the AI uses — so it is
+   presentable to anyone (no personal notes, no Danish). buildSmartPlan and
+   normalizePlan are hoisted, so calling them here (at runtime) is fine. */
+function builtinPlan() {
+  const inp = { goal: "marathon", weeks: 16, days: 4, level: "beginner",
+    weeklyKM: 0, longestRun: 0, injuries: "", notes: "" };
+  return normalizePlan(buildSmartPlan(inp), inp);
+}
+
+/* Apply a normalized plan (from builtinPlan or the coach) onto a state object. */
+function setPlan(target, bp, engine) {
+  target.plan = bp.sessions.map((s) => ({ ...s, id: uid(), completed: false }));
+  target.planMeta = {
+    weeks: bp.weeks, goalLabel: bp.goalLabel, phases: bp.phases,
+    weekKM: bp.weekKM, summary: bp.summary, engine: engine || "coach", created: Date.now(),
+  };
+  target.planVersion = PLAN_VERSION;
 }
 
 /* ============================== Derived metrics ============================== */
@@ -629,15 +642,36 @@ function parseStravaCSV(text) {
 
 function importStravaSessions(parsed) {
   const existing = new Set(state.cardio.filter((c) => c.stravaId).map((c) => c.stravaId));
+  const ignored = new Set(state.ignoredStrava || []); // activities the user deleted stay gone
   let added = 0, dup = 0;
   for (const s of parsed.sessions) {
-    if (s.stravaId && existing.has(s.stravaId)) { dup++; continue; }
+    if (s.stravaId && (existing.has(s.stravaId) || ignored.has(s.stravaId))) { dup++; continue; }
     state.cardio.push(s);
     if (s.stravaId) existing.add(s.stravaId);
     added++;
   }
+  reconcilePlan();
   save();
   return { added, dup };
+}
+
+/* Auto-tick planned sessions when a matching activity is logged the same day.
+   Only ever checks sessions ON — a manual check is never undone. Returns true
+   if anything changed. */
+function reconcilePlan() {
+  if (!Array.isArray(state.plan) || !state.planStartDate) return false;
+  const logged = new Set();
+  for (const c of state.cardio) logged.add(startOfDay(c.date) + "|" + c.sport);
+  for (const w of state.history) logged.add(startOfDay(w.date) + "|strength");
+  const base = new Date(startOfDay(state.planStartDate));
+  let changed = false;
+  for (const s of state.plan) {
+    if (s.completed || s.sport === "rest") continue;
+    const d = new Date(base);
+    d.setDate(d.getDate() + (s.week - 1) * 7 + (s.day - 1)); // calendar add is DST-safe
+    if (logged.has(startOfDay(d.getTime()) + "|" + s.sport)) { s.completed = true; changed = true; }
+  }
+  return changed;
 }
 
 /* ============================== Seed data ============================== */
@@ -682,16 +716,18 @@ function seed() {
   ];
 
   // Fresh profiles start with a clean slate — exercises, workout templates and
-  // the training plan, but no logged progress. Each person fills in their own.
-  return {
+  // a generic starter plan, but no logged progress. Each person fills in their
+  // own history and can build a personal plan in the Coach tab.
+  const s = {
     exercises,
     templates,
     history: [],
     cardio: [],
-    plan: generatePlan(),
-    planStartDate: PLAN_START_DEFAULT,
-    planVersion: PLAN_VERSION,
+    ignoredStrava: [],
+    planStartDate: startOfWeek(Date.now()),
   };
+  setPlan(s, builtinPlan());
+  return s;
 }
 
 /* ============================== UI state ============================== */
@@ -782,6 +818,18 @@ function renderHome() {
           <button class="icon-btn" style="width:28px;height:28px;font-size:12px" onclick="A.dismissIosBanner()">✕</button>
         </div>
       </div>` : ""}
+      ${startOfDay(Date.now()) > raceDate() ? `
+      <div class="card" style="border-color:rgba(199,255,89,.4)">
+        <div class="countdown-row">
+          <div class="flag-ico">🎉</div>
+          <div style="flex:1">
+            <div class="card-title">${esc(planGoalLabel())} — plan complete!</div>
+            <div class="card-sub">Race day was ${fmtDateLong(raceDate())}. Amazing work.</div>
+          </div>
+        </div>
+        <button class="btn btn-accent" style="margin-top:12px" onclick="A.go('coach')">Set your next goal →</button>
+      </div>
+      ` : `
       <div class="card">
         <div class="countdown-row">
           <div class="flag-ico">🏁</div>
@@ -795,7 +843,7 @@ function renderHome() {
             <div class="stat-lbl" style="text-align:center">days to go</div>
           </div>
         </div>
-      </div>
+      </div>`}
 
       <div class="card">
         <div class="ring-wrap">
@@ -811,9 +859,12 @@ function renderHome() {
           <div>
             <div class="eyebrow">Race Readiness</div>
             <div class="ready-label" style="color:${hex}">${hasData ? readinessLabel(score) : "Ready when you are"}</div>
-            <div class="card-sub" style="line-height:1.5">${hasData ? readinessAdvice(score) : "Log a workout or import your Strava history to see your race readiness."}</div>
+            <div class="card-sub" style="line-height:1.5">${hasData ? readinessAdvice(score) : "Log a workout or connect Strava to see your race readiness."}</div>
           </div>
         </div>
+        ${!hasData && !(state.strava && state.strava.session)
+          ? `<button class="btn btn-strava" style="margin-top:12px" onclick="A.stravaConnect()">Connect with Strava</button>`
+          : ""}
       </div>
 
       <div class="card">
@@ -874,7 +925,7 @@ function renderPlan() {
         <div class="screen-title">${esc(planGoalLabel())} Plan</div>
         <div class="screen-sub">${meta
           ? `Your personal ${meta.weeks}-week plan · built by the ${meta.engine === "ai" ? "AI coach" : "coach engine"}`
-          : "Din 20-ugers hybridplan · 3 løbedage + 3 styrkedage"}</div>
+          : "Your 20-week hybrid plan · 3 run days + 3 strength days"}</div>
       </div>
       <button class="icon-btn" title="Plan settings" onclick="A.openPlanSettings()">⚙</button>
     </div>
@@ -896,9 +947,9 @@ function renderPlan() {
       </div>
 
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <div style="font-size:19px;font-weight:800">Uge ${week}</div>
+        <div style="font-size:19px;font-weight:800">Week ${week}</div>
         <span class="phase-pill" style="background:${phc}22;color:${phc}">${esc(planPhaseAt(week).toUpperCase())}</span>
-        ${km != null ? `<span class="phase-pill" style="background:rgba(255,255,255,.07);color:var(--text-sec)">${km} KM LØB</span>` : ""}
+        ${km != null ? `<span class="phase-pill" style="background:rgba(255,255,255,.07);color:var(--text-sec)">${km} KM RUN</span>` : ""}
       </div>
 
       ${sessions.map((s) => `
@@ -1202,6 +1253,16 @@ function confirmSheet(message, onYes, yesLabel = "Confirm") {
   $("#confirm-yes").onclick = () => { closeModal(); onYes(); };
 }
 
+function showUpdateBanner() {
+  if (document.querySelector(".update-banner")) return;
+  const el = document.createElement("div");
+  el.className = "update-banner";
+  el.innerHTML = `<span>New version available</span>
+    <button onclick="A.applyUpdate()">Refresh</button>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+}
+
 function promptSheet(title, initial, placeholder, onSave) {
   openModal(`
     <div class="sheet-title">${esc(title)}</div>
@@ -1242,6 +1303,15 @@ function openProfiles() {
           ${p.id === currentId ? `<button class="icon-btn" style="width:30px;height:30px;font-size:13px" title="Rename" onclick="A.renameProfile()">✎</button>` : ""}
           ${profiles.length > 1 ? `<button class="icon-btn" style="width:30px;height:30px;font-size:13px" title="Delete" onclick="A.deleteProfile('${p.id}')">✕</button>` : ""}
         </div>`).join("")}
+    </div>
+    <div class="divider"></div>
+    <div class="field-label">Backup</div>
+    <div class="card-sub" style="line-height:1.6">Save all profiles and history to a file — then restore it on a new phone or after reinstalling.</div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="A.exportData()">⤓ Export backup</button>
+      <label class="btn btn-ghost btn-sm" style="flex:1;text-align:center;cursor:pointer">⤒ Restore
+        <input type="file" accept="application/json,.json" style="display:none" onchange="A.importDataFile(event)">
+      </label>
     </div>
     <div class="divider"></div>
     <button class="btn btn-danger" onclick="A.clearProgress()">Clear this profile's progress</button>
@@ -1313,6 +1383,55 @@ function clearProgress() {
     render();
     toast("Progress cleared.");
   }, "Clear");
+}
+
+/* ---------- Backup & restore (all profiles) ---------- */
+
+function exportData() {
+  save();
+  const out = { app: "tritrack-ai", version: 1, exported: Date.now(), profiles, data: {} };
+  for (const p of profiles) {
+    try {
+      const raw = localStorage.getItem(dataKey(p.id));
+      if (raw) out.data[p.id] = JSON.parse(raw);
+    } catch {}
+  }
+  const blob = new Blob([JSON.stringify(out)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `tritrack-backup-${toLocalDate(Date.now())}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast("Backup saved to your files.");
+}
+
+function importDataFile(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let parsed;
+    try { parsed = JSON.parse(reader.result); } catch { parsed = null; }
+    if (!parsed || parsed.app !== "tritrack-ai" || !Array.isArray(parsed.profiles) || !parsed.data) {
+      toast("That doesn't look like a TriTrack backup.");
+      return;
+    }
+    confirmSheet("Restore this backup? It replaces all profiles and data currently on this device.", () => {
+      for (const p of parsed.profiles) {
+        if (parsed.data[p.id]) localStorage.setItem(dataKey(p.id), JSON.stringify(parsed.data[p.id]));
+      }
+      profiles = parsed.profiles;
+      currentId = profiles[0] && profiles[0].id;
+      state = readData(currentId) || seed();
+      ui.planWeek = null;
+      ui.tab = "home";
+      saveProfiles();
+      save();
+      render();
+      toast("Backup restored.");
+    }, "Restore");
+  };
+  reader.readAsText(file);
 }
 
 /* ---------- Exercise library ---------- */
@@ -1509,7 +1628,7 @@ function renderCardioModal() {
     <div class="field-label">Date & time</div>
     <input class="input" type="datetime-local" id="cd-date" value="${toLocalDT(c.date)}">
     <div class="field-label">Distance (km)</div>
-    <input class="input" type="number" id="cd-dist" inputmode="decimal" step="0.1" min="0" value="${c.distanceKM}">
+    <input class="input" type="text" id="cd-dist" inputmode="decimal" value="${c.distanceKM}">
     <div class="field-label">Duration</div>
     <div class="dur-grid">
       <div><input class="input num-in" type="number" id="cd-h" min="0" max="23" value="${h}"><div class="hint">hours</div></div>
@@ -1531,7 +1650,7 @@ function cardioSport(sp) {
   cardioDraft.sport = sp;
   // Preserve typed values before re-render
   cardioDraft.date = new Date($("#cd-date").value || Date.now()).getTime() || cardioDraft.date;
-  cardioDraft.distanceKM = parseFloat($("#cd-dist").value) || cardioDraft.distanceKM;
+  cardioDraft.distanceKM = toNum($("#cd-dist").value) || cardioDraft.distanceKM;
   cardioDraft.durationSeconds =
     (parseInt($("#cd-h").value) || 0) * 3600 + (parseInt($("#cd-m").value) || 0) * 60 + (parseInt($("#cd-s").value) || 0);
   cardioDraft.effort = parseInt($("#cd-rpe").value) || 5;
@@ -1543,7 +1662,7 @@ function saveCardio() {
   const c = cardioDraft;
   const date = new Date($("#cd-date").value);
   c.date = isNaN(date.getTime()) ? Date.now() : date.getTime();
-  c.distanceKM = Math.max(0, parseFloat($("#cd-dist").value) || 0);
+  c.distanceKM = Math.max(0, toNum($("#cd-dist").value) || 0);
   c.durationSeconds =
     (parseInt($("#cd-h").value) || 0) * 3600 + (parseInt($("#cd-m").value) || 0) * 60 + (parseInt($("#cd-s").value) || 0);
   c.effort = parseInt($("#cd-rpe").value) || 5;
@@ -1553,6 +1672,7 @@ function saveCardio() {
   const i = state.cardio.findIndex((x) => x.id === c.id);
   if (i >= 0) state.cardio[i] = c; else state.cardio.unshift(c);
   cardioDraft = null;
+  reconcilePlan();
   save();
   closeModal();
   render();
@@ -1560,6 +1680,12 @@ function saveCardio() {
 
 function deleteCardio(id) {
   confirmSheet("Delete this session?", () => {
+    const c = state.cardio.find((x) => x.id === id);
+    // Remember deleted Strava activities so auto-sync doesn't bring them back.
+    if (c && c.stravaId) {
+      state.ignoredStrava = state.ignoredStrava || [];
+      if (!state.ignoredStrava.includes(c.stravaId)) state.ignoredStrava.push(c.stravaId);
+    }
     state.cardio = state.cardio.filter((x) => x.id !== id);
     save();
     render();
@@ -1887,21 +2013,20 @@ function openPlanSettings() {
     <div class="card-sub" style="margin-top:8px">Race day is the last day of week ${W} — exactly ${W} weeks after the start date.</div>
     <div class="sheet-actions" style="flex-direction:column">
       <button class="btn btn-accent" onclick="A.applyPlanStart(false)">Apply Start Date</button>
-      ${state.planMeta
-        ? `<button class="btn btn-danger" onclick="A.restoreBuiltinPlan()">Restore built-in 20-week plan (resets check-offs)</button>`
-        : `<button class="btn btn-danger" onclick="A.applyPlanStart(true)">Regenerate Plan (resets check-offs)</button>`}
+      <button class="btn btn-accent" onclick="A.closeModal();A.go('coach')">Build a new plan in Coach →</button>
+      <button class="btn btn-danger" onclick="A.restoreBuiltinPlan()">Reset to built-in starter plan</button>
       <button class="btn btn-ghost" onclick="A.closeModal()">Cancel</button>
     </div>`);
 }
 
 function restoreBuiltinPlan() {
-  confirmSheet("Replace your coach-built plan with the built-in 20-week marathon plan? All check-offs will be cleared.", () => {
-    delete state.planMeta;
-    state.plan = generatePlan();
-    state.planVersion = PLAN_VERSION;
+  confirmSheet("Replace your coach-built plan with the built-in starter plan? All check-offs will be cleared.", () => {
+    setPlan(state, builtinPlan());
+    state.planStartDate = startOfWeek(Date.now());
     ui.planWeek = null;
     save();
     render();
+    toast("Built-in plan restored.");
   }, "Restore");
 }
 
@@ -1911,7 +2036,7 @@ function applyPlanStart(regen) {
   if (!d || isNaN(d.getTime())) return;
   const doIt = () => {
     state.planStartDate = d.getTime();
-    if (regen) state.plan = generatePlan();
+    if (regen) setPlan(state, builtinPlan());
     ui.planWeek = null;
     save();
     closeModal();
@@ -1986,7 +2111,7 @@ function awBodyHTML() {
           ${e.sets.map((s, i) => `
             <div class="set-row">
               <div class="set-num">${i + 1}</div>
-              <input class="num-in" type="number" inputmode="decimal" step="0.5" min="0" value="${s.weight}"
+              <input class="num-in" type="text" inputmode="decimal" value="${s.weight}"
                 onchange="A.awEditSet('${e.id}','${s.id}','weight',this.value)">
               <input class="num-in" type="number" inputmode="numeric" min="0" value="${s.reps}"
                 onchange="A.awEditSet('${e.id}','${s.id}','reps',this.value)">
@@ -2021,6 +2146,13 @@ function awRenderRest() {
   const host = $("#aw-rest");
   if (!host || !aw) return;
   if (!aw.restEnd || aw.restEnd <= Date.now()) {
+    // Rest just ended → let the athlete know (the phone may be face-down).
+    if (aw.restEnd && !aw.restDone) {
+      aw.restDone = true;
+      aw.restEnd = null;
+      if (navigator.vibrate) { try { navigator.vibrate([120, 60, 120]); } catch {} }
+      toast("Rest's up — next set 💪");
+    }
     if (host.innerHTML) host.innerHTML = "";
     return;
   }
@@ -2054,8 +2186,35 @@ function awEditSet(exId, setId, field, value) {
   const e = aw?.w.exercises.find((x) => x.id === exId);
   const s = e?.sets.find((x) => x.id === setId);
   if (!s) return;
-  if (field === "weight") s.weight = Math.max(0, parseFloat(value) || 0);
+  if (field === "weight") s.weight = Math.max(0, toNum(value) || 0);
   else s.reps = Math.max(0, parseInt(value) || 0);
+}
+
+/* Rest-timer chime. Scheduled ON THE TAP that starts the rest (a user gesture),
+   so it fires even on iOS, which blocks audio started without a recent gesture. */
+let audioCtx = null;
+function scheduleRestBeep(delaySec) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = audioCtx || new AC();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const t0 = audioCtx.currentTime + delaySec;
+    [0, 0.18].forEach((off, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = i ? 1160 : 880;
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.0001, t0 + off);
+      gain.gain.exponentialRampToValueAtTime(0.35, t0 + off + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + off + 0.16);
+      osc.start(t0 + off); osc.stop(t0 + off + 0.18);
+      aw && (aw.beeps = aw.beeps || []).push(osc);
+    });
+  } catch {}
+}
+function cancelRestBeep() {
+  if (aw && aw.beeps) { aw.beeps.forEach((o) => { try { o.stop(); } catch {} }); aw.beeps = []; }
 }
 
 function awToggleSet(exId, setId) {
@@ -2063,7 +2222,12 @@ function awToggleSet(exId, setId) {
   const s = e?.sets.find((x) => x.id === setId);
   if (!s) return;
   s.done = !s.done;
-  if (s.done) aw.restEnd = Date.now() + REST_SECONDS * 1000;
+  if (s.done) {
+    cancelRestBeep();
+    aw.restEnd = Date.now() + REST_SECONDS * 1000;
+    aw.restDone = false;
+    scheduleRestBeep(REST_SECONDS);
+  }
   awRefreshBody();
   awRenderRest();
 }
@@ -2134,6 +2298,7 @@ function awFinish() {
   aw.w.name = (aw.w.name || "").trim() || "Workout";
   state.history.unshift(aw.w);
   endAW();
+  reconcilePlan();
   save();
   render();
 }
@@ -2144,12 +2309,13 @@ function awDiscard() {
 }
 
 function awSkipRest() {
-  if (aw) aw.restEnd = null;
+  if (aw) { aw.restEnd = null; aw.restDone = true; cancelRestBeep(); }
   awRenderRest();
 }
 
 function endAW() {
   if (aw?.interval) clearInterval(aw.interval);
+  cancelRestBeep();
   aw = null;
   $("#aw-root").innerHTML = "";
 }
@@ -2177,6 +2343,35 @@ const COACH_PULL = "Pull-ups or rows 4x8-10, Seated row 3x12, Bicep curl 3x12, R
 const COACH_LEGS = "Goblet squat 4x10, Split squat 3x10/side, Step-up 3x10/side, Hip thrust 3x12, Calf raise 3x15, Plank 3x45s";
 const COACH_CORE = "Plank 3x45s, Side plank 3x30s/side, Dead bug 3x12, Bird-dog 3x10/side, Glute bridge 3x15";
 
+/* Race distance (km) used for goal-pace maths. Tri goals use the run leg. */
+const GOAL_RUN_KM = { "5k": 5, "10k": 10, "half": 21.0975, "marathon": 42.195, "im703": 21.0975, "im": 42.195 };
+
+const fmtPace = (secPerKm) => fmtDur(Math.round(secPerKm)) + "/km";
+
+/* Pull a goal finish time out of the free-text notes and turn it into paces.
+   Understands "3:45", "3:45:00", "sub 25", "goal time 1h45", "45 min". */
+function goalPaces(inp) {
+  const dist = GOAL_RUN_KM[inp.goal];
+  if (!dist) return null;
+  const t = " " + String(inp.notes || "").toLowerCase() + " ";
+  let secs = null;
+  let m;
+  if ((m = t.match(/(\d{1,2}):(\d{2}):(\d{2})/)))        secs = +m[1] * 3600 + +m[2] * 60 + +m[3];
+  else if ((m = t.match(/(\d{1,2})\s*h\s*(\d{1,2})/)))    secs = +m[1] * 3600 + +m[2] * 60;
+  else if ((m = t.match(/(\d{1,2}):(\d{2})(?!\d)/)))      secs = (dist > 15 ? +m[1] * 3600 + +m[2] * 60 : +m[1] * 60 + +m[2]);
+  else if ((m = t.match(/(?:sub|goal|target|time|på|under)\D{0,8}(\d{2,3})\s*min/))) secs = +m[1] * 60;
+  if (!secs || secs < 600 || secs > 8 * 3600) return null; // sanity: 10 min … 8 h
+  const rp = secs / dist; // race pace, sec/km
+  return {
+    race: rp,
+    raceStr: fmtPace(rp),
+    easyStr: `${fmtPace(rp + 60)}–${fmtPace(rp + 90)}`,
+    tempoStr: fmtPace(rp - 8),
+    intervalStr: fmtPace(rp - 20),
+    finishStr: fmtDur(secs),
+  };
+}
+
 /* English + Danish injury keywords → what the plan must work around. */
 function injuryFlags(text) {
   const t = (text || "").toLowerCase();
@@ -2194,6 +2389,10 @@ function buildSmartPlan(inp) {
   const W = inp.weeks;
   const inj = injuryFlags(inp.injuries);
   const lvl = { beginner: 0.8, intermediate: 1, advanced: 1.12 }[inp.level] || 1;
+  const gp = goalPaces(inp); // null unless a goal time was given in notes
+  const atRace = gp ? `@ ${gp.raceStr}` : "@ goal race pace";
+  const atTempo = gp ? `@ ${gp.tempoStr}` : "comfortably hard";
+  const atInterval = gp ? `@ ${gp.intervalStr}` : "fast";
 
   /* Phases: Base → Build → Peak → Taper (taper includes race week). */
   const taper = W >= 14 ? 2 : 1;
@@ -2235,7 +2434,7 @@ function buildSmartPlan(inp) {
   /* Session slots by available days — long run + one quality session first,
      then cross-training / strength, mirroring the built-in plan's layout. */
   const order = goal.tri
-    ? [["long", 7], ["quality", 4], ["swim", 3], ["ride", 6], ["easy", 2], ["strengthA", 1], ["recovery", 5]]
+    ? [["long", 7], ["ride", 6], ["quality", 4], ["swim", 3], ["easy", 2], ["strengthA", 1], ["recovery", 5]]
     : [["long", 7], ["quality", 4], ["easy", 2], ["strengthA", 1], ["strengthB", 6], ["strengthC", 3], ["recovery", 5]];
   const slots = order.slice(0, Math.max(3, Math.min(7, inp.days)));
 
@@ -2283,26 +2482,26 @@ function buildSmartPlan(inp) {
 
       if (kind === "long") {
         const detail = ph === "Peak" && !deload
-          ? `Easy pace — run the last ${Math.max(2, Math.round(longKM * 0.25))} km at goal race pace` + painNote
-          : "Easy and controlled — conversational pace" + painNote;
+          ? `Easy pace — run the last ${Math.max(2, Math.round(longKM * 0.25))} km ${atRace}` + painNote
+          : `Easy and controlled${gp ? ` — around ${gp.easyStr}` : " — conversational pace"}` + painNote;
         push(w, day, "run", `Long run · ${longKM} km`, detail);
       } else if (kind === "quality") {
         let t, dt;
         if (ph === "Base") {
           if (w % 2) { t = "Strides + hills"; dt = `${qKM} km easy incl. 6x20s strides + 4x30s hill sprints`; }
-          else { t = "Intervals"; dt = `8x400m fast (jog 200m between) — ~${qKM} km total`; }
+          else { t = "Intervals"; dt = `8x400m ${atInterval} (jog 200m between) — ~${qKM} km total`; }
         } else if (ph === "Build") {
-          if (w % 2) { t = "Tempo run"; dt = `2 km warm-up + ${10 + Math.round(15 * f)} min comfortably hard + 2 km cool-down — ~${qKM} km`; }
-          else { t = "Intervals"; dt = `6x800m (jog 300m between) — ~${qKM} km total`; }
+          if (w % 2) { t = "Tempo run"; dt = `2 km warm-up + ${10 + Math.round(15 * f)} min ${atTempo} + 2 km cool-down — ~${qKM} km`; }
+          else { t = "Intervals"; dt = `6x800m ${atInterval} (jog 300m between) — ~${qKM} km total`; }
         } else if (ph === "Peak") {
-          t = "Race-pace intervals"; dt = `2 km warm-up + 3x${8 + Math.round(4 * f)} min @ goal pace (2 min jog between) + 2 km cool-down — ~${qKM} km`;
+          t = "Race-pace intervals"; dt = `2 km warm-up + 3x${8 + Math.round(4 * f)} min ${atRace} (2 min jog between) + 2 km cool-down — ~${qKM} km`;
         } else {
-          t = "Sharpener"; dt = `${qKM} km incl. 4x3 min @ race pace`;
+          t = "Sharpener"; dt = `${qKM} km incl. 4x3 min ${atRace}`;
         }
         push(w, day, "run", t + (deload ? " (deload)" : ""), dt + painNote);
       } else if (kind === "easy") {
         if (inj.leg) push(w, day, "bike", "Cross-train · Bike", "40–60 min Zone 2 — low-impact stand-in for an easy run");
-        else push(w, day, "run", `Easy run · ${easyKM} km`, "Conversational pace — you should be able to chat");
+        else push(w, day, "run", `Easy run · ${easyKM} km`, `Conversational pace${gp ? ` — around ${gp.easyStr}` : " — you should be able to chat"}`);
       } else if (kind === "recovery") {
         if (inj.leg) push(w, day, "bike", "Recovery spin", "30 min very easy — flush the legs");
         else push(w, day, "run", `Recovery jog · ${Math.max(4, Math.round(easyKM * 0.7))} km`, "Very easy — this run should feel like a rest");
@@ -2329,6 +2528,7 @@ function buildSmartPlan(inp) {
 
   const summary =
     `${W} weeks to ${goal.label} · ${slots.length} sessions/week · peaks at ${Math.max(...weekKM)} km/week with a ${longPeak} km longest run.` +
+    (gp ? ` Paces are tuned to your ${gp.finishStr} goal (race pace ${gp.raceStr}).` : "") +
     (goal.tri ? " Swim and bike sessions build the triathlon base alongside your running." : "") +
     (inj.any ? " Adjusted for your injury notes — volume is capped and low-impact work swapped in. Never push through pain." : "");
 
@@ -2421,8 +2621,8 @@ async function coachGenerate() {
   const inp = { ...coachInputs() };
   inp.weeks = Math.max(4, Math.min(40, parseInt(inp.weeks) || 16));
   inp.days = Math.max(3, Math.min(7, parseInt(inp.days) || 5));
-  inp.weeklyKM = Math.max(0, parseFloat(inp.weeklyKM) || 0);
-  inp.longestRun = Math.max(0, parseFloat(inp.longestRun) || 0);
+  inp.weeklyKM = Math.max(0, toNum(inp.weeklyKM) || 0);
+  inp.longestRun = Math.max(0, toNum(inp.longestRun) || 0);
   if (!COACH_GOALS[inp.goal]) inp.goal = "marathon";
   inp.injuries = String(inp.injuries || "").slice(0, 600);
   inp.notes = String(inp.notes || "").slice(0, 600);
@@ -2615,11 +2815,13 @@ function renderCoach() {
         <div class="field-label">How long until your goal?</div>
         <div style="display:flex;gap:10px;align-items:center">
           <input class="input" type="number" min="4" max="40" inputmode="numeric" value="${esc(inp.weeks)}" style="flex:1"
-            oninput="A.coachField('weeks', this.value)">
+            ${inp.raceDate ? "disabled" : ""} oninput="A.coachField('weeks', this.value)">
           <span class="muted small" style="flex:none">weeks (4–40)</span>
         </div>
-        <div class="field-label">…or pick your race date</div>
-        <input class="input" type="date" value="${esc(inp.raceDate)}" onchange="A.coachRaceDate(this.value)">
+        ${inp.raceDate
+          ? `<div class="card-sub" style="margin-top:6px">Set from your race date (${esc(inp.weeks)} weeks). <a href="#" onclick="A.coachClearRaceDate();return false" style="color:var(--accent)">Clear date to edit weeks</a></div>`
+          : `<div class="field-label">…or pick your race date</div>
+        <input class="input" type="date" value="${esc(inp.raceDate)}" onchange="A.coachRaceDate(this.value)">`}
         <div class="field-label">Training days per week</div>
         <div class="seg">
           ${[3, 4, 5, 6, 7].map((n) => `<button class="${inp.days === n ? "on" : ""}" onclick="A.coachDays(${n})">${n}</button>`).join("")}
@@ -2634,10 +2836,10 @@ function renderCoach() {
       <div class="card">
         <div class="card-title">Where are you now?</div>
         <div class="field-label">Current running per week (km)</div>
-        <input class="input" type="number" min="0" inputmode="decimal" value="${esc(inp.weeklyKM)}" placeholder="e.g. 25"
+        <input class="input" type="text" inputmode="decimal" value="${esc(inp.weeklyKM)}" placeholder="e.g. 25"
           oninput="A.coachField('weeklyKM', this.value)">
         <div class="field-label">Longest recent run (km)</div>
-        <input class="input" type="number" min="0" inputmode="decimal" value="${esc(inp.longestRun)}" placeholder="e.g. 12"
+        <input class="input" type="text" inputmode="decimal" value="${esc(inp.longestRun)}" placeholder="e.g. 12"
           oninput="A.coachField('longestRun', this.value)">
       </div>
 
@@ -2737,6 +2939,7 @@ window.A = {
   coachDays(n) { coachInputs().days = n; render(); },
   coachField(k, v) { coachInputs()[k] = v; },
   coachRaceDate, coachGenerate, coachApply,
+  coachClearRaceDate() { coachInputs().raceDate = ""; render(); },
   coachBack() { ui.coach.result = null; ui.coach.error = null; render(); },
   openAiSettings, saveAiSettings,
   welcomeStrava, welcomeSkip,
@@ -2755,11 +2958,14 @@ window.A = {
   // active workout
   startEmpty, startTemplate, awName, awNotes, awExNotes, awEditSet, awToggleSet,
   awAddSet, awRemoveExercise, awAddExercise, awFilterPick, awPick, awFinish, awDiscard, awSkipRest,
+  // data + updates
+  exportData, importDataFile, applyUpdate() { location.reload(); },
 };
 
 /* ============================== Boot ============================== */
 
 initProfiles();
+if (reconcilePlan()) save(); // tick off any planned sessions already logged
 const fromStravaRedirect = handleStravaRedirect();
 render();
 if (!fromStravaRedirect) stravaAutoSync();
@@ -2771,7 +2977,19 @@ if (!fromStravaRedirect && !localStorage.getItem(WELCOMED_KEY) &&
 }
 
 /* PWA: installable + offline. Skipped on file:// so double-clicking
-   index.html keeps working exactly as before. */
+   index.html keeps working exactly as before. When a new version is deployed,
+   prompt the user to refresh instead of leaving them on a stale build. */
 if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.register("sw.js").then((reg) => {
+    reg.addEventListener("updatefound", () => {
+      const nw = reg.installing;
+      if (!nw) return;
+      nw.addEventListener("statechange", () => {
+        // A new worker is ready AND an old one was controlling → it's an update.
+        if (nw.state === "installed" && navigator.serviceWorker.controller) {
+          showUpdateBanner();
+        }
+      });
+    });
+  }).catch(() => {});
 }
