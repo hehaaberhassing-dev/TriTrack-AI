@@ -2605,21 +2605,32 @@ function coachInputs() {
   return ui.coach.inputs;
 }
 
+/* The date field must NOT trigger a full re-render: rebuilding #view would
+   replace the <input> element and slam an open native date picker shut (that's
+   the "picker flashes then closes" bug). So update state and patch just the
+   affected controls in place. */
 function coachRaceDate(v) {
   const inp = coachInputs();
   const ts = v ? new Date(v + "T00:00:00").getTime() : NaN;
   if (v && (isNaN(ts) || ts <= Date.now())) {
     inp.raceDate = "";
+    patchCoachDate();
     toast("Pick a race date in the future.");
-    render();
     return;
   }
   inp.raceDate = v || "";
-  if (v) {
-    const weeks = Math.round((ts - startOfWeek(Date.now())) / (7 * DAY));
-    inp.weeks = Math.max(4, Math.min(40, weeks));
-  }
-  render();
+  if (v) inp.weeks = Math.max(4, Math.min(40, Math.round((ts - startOfWeek(Date.now())) / (7 * DAY))));
+  patchCoachDate();
+}
+
+function patchCoachDate() {
+  const inp = coachInputs();
+  const dateEl = $("#coach-date"), clear = $("#coach-date-clear");
+  const weeks = $("#coach-weeks"), hint = $("#coach-weeks-hint");
+  if (dateEl && dateEl.value !== (inp.raceDate || "")) dateEl.value = inp.raceDate || "";
+  if (clear) clear.style.display = inp.raceDate ? "" : "none";
+  if (weeks) { weeks.value = inp.weeks; weeks.disabled = !!inp.raceDate; }
+  if (hint) hint.textContent = inp.raceDate ? "set by race date" : "weeks (4–40)";
 }
 
 async function coachGenerate() {
@@ -2837,15 +2848,16 @@ function renderCoach() {
         </div>
         <div class="field-label">Race date <span class="muted" style="font-weight:600;text-transform:none;letter-spacing:0">(optional)</span></div>
         <div style="display:flex;gap:8px;align-items:center">
-          <input class="input" type="date" min="${toLocalDate(Date.now() + DAY)}" value="${esc(inp.raceDate)}" style="flex:1"
+          <input class="input" type="date" id="coach-date" min="${toLocalDate(Date.now() + DAY)}" value="${esc(inp.raceDate)}" style="flex:1"
             onchange="A.coachRaceDate(this.value)">
-          ${inp.raceDate ? `<button class="icon-btn" title="Clear date" onclick="A.coachClearRaceDate()">✕</button>` : ""}
+          <button class="icon-btn" id="coach-date-clear" title="Clear date" onclick="A.coachClearRaceDate()"
+            style="${inp.raceDate ? "" : "display:none"}">✕</button>
         </div>
         <div class="field-label">Weeks until your goal</div>
         <div style="display:flex;gap:10px;align-items:center">
-          <input class="input" type="number" min="4" max="40" inputmode="numeric" value="${esc(inp.weeks)}" style="flex:1"
+          <input class="input" type="number" id="coach-weeks" min="4" max="40" inputmode="numeric" value="${esc(inp.weeks)}" style="flex:1"
             ${inp.raceDate ? "disabled" : ""} oninput="A.coachField('weeks', this.value)">
-          <span class="muted small" style="flex:none">${inp.raceDate ? "set by race date" : "weeks (4–40)"}</span>
+          <span class="muted small" id="coach-weeks-hint" style="flex:none">${inp.raceDate ? "set by race date" : "weeks (4–40)"}</span>
         </div>
         <div class="field-label">Training days per week</div>
         <div class="seg">
@@ -2964,7 +2976,7 @@ window.A = {
   coachDays(n) { coachInputs().days = n; render(); },
   coachField(k, v) { coachInputs()[k] = v; },
   coachRaceDate, coachGenerate, coachApply,
-  coachClearRaceDate() { coachInputs().raceDate = ""; render(); },
+  coachClearRaceDate() { coachInputs().raceDate = ""; patchCoachDate(); },
   coachSkipOnboarding() { localStorage.setItem(ONBOARDED_KEY, "1"); ui.tab = "home"; render(); },
   coachBack() { ui.coach.result = null; ui.coach.error = null; render(); },
   openAiSettings, saveAiSettings,
