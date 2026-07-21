@@ -2607,11 +2607,17 @@ function coachInputs() {
 
 function coachRaceDate(v) {
   const inp = coachInputs();
-  inp.raceDate = v || "";
   const ts = v ? new Date(v + "T00:00:00").getTime() : NaN;
-  if (!isNaN(ts) && ts > Date.now()) {
-    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-    inp.weeks = Math.max(4, Math.min(40, Math.round((ts - d.getTime()) / (7 * DAY))));
+  if (v && (isNaN(ts) || ts <= Date.now())) {
+    inp.raceDate = "";
+    toast("Pick a race date in the future.");
+    render();
+    return;
+  }
+  inp.raceDate = v || "";
+  if (v) {
+    const weeks = Math.round((ts - startOfWeek(Date.now())) / (7 * DAY));
+    inp.weeks = Math.max(4, Math.min(40, weeks));
   }
   render();
 }
@@ -2693,6 +2699,7 @@ function doCoachApply() {
   state.planVersion = PLAN_VERSION;
   ui.coach.result = null;
   ui.planWeek = null;
+  localStorage.setItem(ONBOARDED_KEY, "1"); // finished first-run setup
   save();
   ui.tab = "plan";
   render();
@@ -2730,6 +2737,7 @@ function saveAiSettings() {
    Shown once per browser; returning from the Strava redirect also counts. */
 
 const WELCOMED_KEY = "tritrack:welcomed";
+const ONBOARDED_KEY = "tritrack:onboarded"; // set once they build a plan or skip setup
 
 /* iOS keeps Safari and the installed (home-screen) app in totally separate
    storage jars — setup done in one never reaches the other. So in Safari on
@@ -2764,6 +2772,9 @@ function showWelcome() {
 function welcomeSkip() {
   localStorage.setItem(WELCOMED_KEY, "1");
   closeModal();
+  // Straight into building their first plan (they can skip that too).
+  ui.tab = "coach";
+  render();
 }
 
 function welcomeStrava() {
@@ -2797,31 +2808,45 @@ function renderCoach() {
   if (c.result) { renderCoachResult(); return; }
 
   const inp = coachInputs();
+  const onboarding = !localStorage.getItem(ONBOARDED_KEY);
   $("#view").innerHTML = `
     <div class="view-head">
       <div>
-        <div class="screen-title">AI Coach</div>
-        <div class="screen-sub">Your goal + your body = your plan</div>
+        <div class="screen-title">${onboarding ? "Let's build your plan" : "AI Coach"}</div>
+        <div class="screen-sub">${onboarding ? "Answer a few questions and your training is ready" : "Your goal + your body = your plan"}</div>
       </div>
       <button class="icon-btn" title="AI engine settings" onclick="A.openAiSettings()">⚙</button>
     </div>
     <div class="stack">
+      ${onboarding ? `
+      <div class="card" style="border-color:rgba(199,255,89,.3)">
+        <div style="display:flex;gap:11px;align-items:center">
+          <div style="font-size:22px">👋</div>
+          <div style="flex:1;min-width:0">
+            <div class="card-title" style="font-size:14px">Welcome! Start with your goal below.</div>
+            <div class="card-sub" style="margin-top:2px">Prefer to explore first? You can set this up any time.</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex:none" onclick="A.coachSkipOnboarding()">Skip</button>
+        </div>
+      </div>` : ""}
       <div class="card">
         <div class="card-title">What are you training for?</div>
         <div class="chip-grid" style="margin-top:10px">
           ${Object.entries(COACH_GOALS).map(([id, g]) =>
             `<button class="goal-chip ${inp.goal === id ? "on" : ""}" onclick="A.coachGoal('${id}')">${g.label}</button>`).join("")}
         </div>
-        <div class="field-label">How long until your goal?</div>
+        <div class="field-label">Race date <span class="muted" style="font-weight:600;text-transform:none;letter-spacing:0">(optional)</span></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="input" type="date" min="${toLocalDate(Date.now() + DAY)}" value="${esc(inp.raceDate)}" style="flex:1"
+            onchange="A.coachRaceDate(this.value)">
+          ${inp.raceDate ? `<button class="icon-btn" title="Clear date" onclick="A.coachClearRaceDate()">✕</button>` : ""}
+        </div>
+        <div class="field-label">Weeks until your goal</div>
         <div style="display:flex;gap:10px;align-items:center">
           <input class="input" type="number" min="4" max="40" inputmode="numeric" value="${esc(inp.weeks)}" style="flex:1"
             ${inp.raceDate ? "disabled" : ""} oninput="A.coachField('weeks', this.value)">
-          <span class="muted small" style="flex:none">weeks (4–40)</span>
+          <span class="muted small" style="flex:none">${inp.raceDate ? "set by race date" : "weeks (4–40)"}</span>
         </div>
-        ${inp.raceDate
-          ? `<div class="card-sub" style="margin-top:6px">Set from your race date (${esc(inp.weeks)} weeks). <a href="#" onclick="A.coachClearRaceDate();return false" style="color:var(--accent)">Clear date to edit weeks</a></div>`
-          : `<div class="field-label">…or pick your race date</div>
-        <input class="input" type="date" value="${esc(inp.raceDate)}" onchange="A.coachRaceDate(this.value)">`}
         <div class="field-label">Training days per week</div>
         <div class="seg">
           ${[3, 4, 5, 6, 7].map((n) => `<button class="${inp.days === n ? "on" : ""}" onclick="A.coachDays(${n})">${n}</button>`).join("")}
@@ -2940,6 +2965,7 @@ window.A = {
   coachField(k, v) { coachInputs()[k] = v; },
   coachRaceDate, coachGenerate, coachApply,
   coachClearRaceDate() { coachInputs().raceDate = ""; render(); },
+  coachSkipOnboarding() { localStorage.setItem(ONBOARDED_KEY, "1"); ui.tab = "home"; render(); },
   coachBack() { ui.coach.result = null; ui.coach.error = null; render(); },
   openAiSettings, saveAiSettings,
   welcomeStrava, welcomeSkip,
@@ -2966,11 +2992,17 @@ window.A = {
 
 initProfiles();
 if (reconcilePlan()) save(); // tick off any planned sessions already logged
+
+// New users land on the Coach tab to build their first plan; returning users
+// open on Home as usual.
+if (!localStorage.getItem(ONBOARDED_KEY)) ui.tab = "coach";
+
 const fromStravaRedirect = handleStravaRedirect();
 render();
 if (!fromStravaRedirect) stravaAutoSync();
 
-// First launch: offer one-tap Strava login (skippable, shown once).
+// First launch: offer one-tap Strava login (skippable, shown once). After it,
+// the Coach tab is already waiting behind the sheet.
 if (!fromStravaRedirect && !localStorage.getItem(WELCOMED_KEY) &&
     !(state.strava && state.strava.session)) {
   showWelcome();
